@@ -42,3 +42,5 @@ $NDS = \frac{1}{10} \left[ 5 \times \text{mAP} + \sum_{mTP \in TP} \left( 1 - \m
 <img src="res\BEVFormer1.png" alt="核心架构" width="600" />
 encorder主要组成有：BEV queries, temporal self-attention, spatial cross-attention, feed forward，temporal self-attention处理了BEV features的时序信息；spatial cross-attention的输入是多视角图像经过BackBone网络输出的features。输出的BEV features可用于3D object detection和map segmentation等下游任务
 
+### Conclusion
+BEVFormer是自动驾驶感知部分的典范，感知层主要流程：数据集的加载与预处理 -> 各类传感器原始数据的转换(主要转换成张量，可以加入位置、类别嵌入) -> Encorder(先用Resnet提取特征金字塔，再用时空transformer输出bev_features) -> Decorder(3D检测任务的探测头)，这也是主要的代码逻辑
