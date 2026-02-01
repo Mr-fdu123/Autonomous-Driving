@@ -725,6 +725,8 @@ class DiffusionDataset(torch.utils.data.Dataset):
                         continue
                     if (id not in id_list):
                         continue
+                    if id not in id_dict:
+                        continue
                     rid=id_dict[id]
                     tt = t-idx+20
                     p_w = np.array([dic['location'][0], -dic['location'][1], dic['location'][2], 1.0], dtype=np.float32)
@@ -875,12 +877,14 @@ class DiffusionDataset(torch.utils.data.Dataset):
         # 筛选route_lanes
         count = 0
         for i, lane_key in enumerate(lane_keys):
+            if i >= self.lane_num:
+                break
             if lane_key in self.route_ids:
+                if count >= self.route_num:
+                    break
                 route_lanes[count] = lanes[i]
                 route_lanes_has_speed_limit[count] = False
                 count += 1
-            if count >= self.route_num:
-                break
         return lanes, lanes_speed_limit, lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit
         
 
