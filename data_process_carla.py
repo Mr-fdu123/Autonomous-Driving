@@ -66,15 +66,15 @@ def process_route(route_dir: Path, map_file: Path, args, output_dir: Path):
         static_objects_num=args.static_objects_num,
     )
 
-    if len(dataset) < args.past_len + args.future_len:
-        print(f"[SKIP] {route_dir} (len={len(dataset)}) < past+future ({args.past_len + args.future_len})", flush=True)
+    if len(dataset) < 1:
+        print(f"[SKIP] {route_dir} (len={len(dataset)}) < 1", flush=True)
         return []
 
     data_list = []
     town = find_town_name(route_dir)
     route_name = route_dir.name
 
-    idx_iter = range(args.past_len - 1, len(dataset) - args.future_len, args.stride)
+    idx_iter = range(0, len(dataset), args.stride) 
     if tqdm is not None:
         idx_iter = tqdm(
             idx_iter,
