@@ -609,7 +609,7 @@ class DiffusionDataset(torch.utils.data.Dataset):
         data['ego_agent_future'] = ego_agent_future
         data['neighbor_agents_past'] = agent_features_past
         data['neighbor_agents_future'] = agent_features_future
-        data['static_objects'] = self.get_static()
+        data['static_objects'] = self.get_static(idx)
         ego_center = ego_box.get('center') or ego_box.get('location')
         q_xy = (ego_center[0], -ego_center[1])
         lanes, lanes_speed_limit, lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit=self.get_map_features(idx, q_xy)
@@ -748,6 +748,10 @@ class DiffusionDataset(torch.utils.data.Dataset):
                     if t >= idx+1:
                         agent_features_future[rid, tt-21] = np.array([x, y, heading_ego], dtype=np.float32)
                     # 计算过去和现在21帧
+                    keywords = [
+                        'bicycle', 'bike', 'gazelle', 'diamondback', 'century', 
+                         'ninja', 'harley', 'low_rider', 'yzf', 'zx125', 'vespa'
+                        ]
                     if dic['class'] == 'vehicle' and t <= idx:
                         agent_features_past[rid, tt] = np.array([x, y, np.cos(heading_ego), np.sin(heading_ego),
                                                      vx, vy, width, length,
@@ -756,15 +760,16 @@ class DiffusionDataset(torch.utils.data.Dataset):
                         agent_features_past[rid, tt] = np.array([x, y, np.cos(heading_ego), np.sin(heading_ego),
                                                      vx, vy, width, length,
                                                      0.0, 1.0, 0.0], dtype=np.float32)
-                    elif dic['class'] == 'bicycle' and t <= idx:
+                    elif (dic['class'] == 'bicycle' or any(key in dic['type_id'] for key in keywords)) and t <= idx:
                         agent_features_past[rid, tt] = np.array([x, y, np.cos(heading_ego), np.sin(heading_ego),
                                                      vx, vy, width, length,
                                                      0.0, 0.0, 1.0], dtype=np.float32)
         return ego_agent_future, agent_features_past, agent_features_future
     
-    # 获取每一帧的交通灯信号
+    # 获取每一帧的交通灯信号和速度限制信息
     def process_tls(self, idx) -> Dict:
-        tls = {}
+        tls = {} # 交通灯
+        speed_limit = {} # 限速信息
         with gzip.open(self._log_file[idx], 'rt', encoding='utf-8') as gz_file:
             anno = json.load(gz_file)
             for dic in anno['bounding_boxes']:
@@ -773,10 +778,51 @@ class DiffusionDataset(torch.utils.data.Dataset):
                     lane_keys=get_keys_for_points_in_polygons(point,self.lane_polygons,self.lane_tree)[0]
                     for lane_key in lane_keys:
                         tls[lane_key] = self.tls_dict[dic['state']]
-        return tls
+                if dic['class']=='traffic_sign' and 'traffic.speed_limit' in dic['type_id']:
+                    point=[(dic['trigger_volume_location'][0],-dic['trigger_volume_location'][1])]
+                    lane_keys=get_keys_for_points_in_polygons(point,self.lane_polygons,self.lane_tree)[0]
+                    for lane_key in lane_keys:
+                        val = int(dic['type_id'].split('.')[-1]) # 限速值
+                        speed_limit[lane_key] = [val, bool(dic['affects_ego'])]
+        return tls, speed_limit
 
-    def get_static(self):
+    def get_static(self, idx):
         static_objects = np.zeros((self.static_objects_num, 10), dtype=np.float32)
+        static_list = [] # 存放static dicts
+        with gzip.open(self._log_file[idx], 'rt', encoding='utf-8') as gz_file:
+            anno = json.load(gz_file)
+            for dic in anno['bounding_boxes']:
+                if dic['class'] == 'ego_vehicle':
+                    ego_id = dic['id']
+                    # 得到世界->自车坐标系转化矩阵
+                    world2ego = dic['world2ego']
+                    w2e = np.array(world2ego, dtype=np.float32)
+                    w2e = self._to_right_hand_transform(w2e)
+                    rot = w2e[:3, :3]
+                if dic['class'] == 'traffic_sign' and 'static.prop' in dic['type_id']:
+                    static_list.append(dic)
+        if w2e is None:
+            raise ValueError(f"ego_vehicle not found in {self._log_file[idx]}")
+        static_list = sorted(static_list, key=lambda x: x['distance'])[:self.static_objects_num]
+        for i, obj in enumerate(static_list):
+            p_w = np.array([obj['center'][0], -obj['center'][1], obj['center'][2], 1.0], dtype=np.float32)
+            p_ego = w2e @ p_w.T
+            heading_w = -math.radians(obj['rotation'][2])
+            h_w = np.array([np.cos(heading_w), np.sin(heading_w), 0.0], dtype=np.float32)
+            h_ego = rot @ h_w
+            heading_ego = np.arctan2(h_ego[1], h_ego[0])
+            width = obj['extent'][1] * 2
+            length = obj['extent'][0] * 2
+            static_objects[i][:6] = np.array([p_ego[0], p_ego[1], np.cos(heading_ego), np.sin(heading_ego),
+                                            width, length], dtype=np.float32)
+            if 'static.prop' in obj['type_id']:
+                if ('cone' in obj['type_id']) or ('warning' in obj['type_id']):
+                    static_objects[i][6:10] = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+                elif 'barrier' in obj['type_id']:
+                    static_objects[i][6:10] = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+                else:
+                    static_objects[i][6:10] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+
         return static_objects
     
     def _get_crosswalk_edges(
@@ -841,7 +887,7 @@ class DiffusionDataset(torch.utils.data.Dataset):
         route_lanes_speed_limit = np.zeros((self.route_num, 1), dtype=np.float32)
         route_lanes_has_speed_limit = np.zeros((self.route_num, 1), dtype=np.bool_)
         # 交通灯信息
-        tls = self.process_tls(idx)
+        tls, speed_limit = self.process_tls(idx)
         for i,lane_key in enumerate(lane_keys):
             if i >= self.lane_num:
                 break
@@ -873,7 +919,11 @@ class DiffusionDataset(torch.utils.data.Dataset):
             lanes[i][:, 4:6] = left_bound - centerline[:P, :]
             lanes[i][:, 6:8] = right_bound - centerline[:P, :]
             lanes[i][:, 8:12] = tls_one_hot
-            lanes_has_speed_limit[i] = False
+            if lane_key in speed_limit.keys():
+                lanes_speed_limit[i] = speed_limit[lane_key][0]
+                lanes_has_speed_limit[i] = speed_limit[lane_key][1]
+            else:
+                lanes_has_speed_limit[i] = False
         # 筛选route_lanes
         count = 0
         for i, lane_key in enumerate(lane_keys):
@@ -883,7 +933,8 @@ class DiffusionDataset(torch.utils.data.Dataset):
                 if count >= self.route_num:
                     break
                 route_lanes[count] = lanes[i]
-                route_lanes_has_speed_limit[count] = False
+                route_lanes_speed_limit[count] = lanes_speed_limit[i]
+                route_lanes_has_speed_limit[count] = lanes_has_speed_limit[i]
                 count += 1
         return lanes, lanes_speed_limit, lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit
         
